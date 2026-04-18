@@ -1,0 +1,11 @@
+opencv-python
+numpy
+ultralytics
+onnxruntime
+fastapi
+uvicorn
+supervision
+sahi
+requests
+torch
+pydantic

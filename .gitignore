@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+
+# Large media files
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# AI / ML Models
+# Model weights are small enough to be tracked natively
+
+# OS files
+.DS_Store
+Thumbs.db
