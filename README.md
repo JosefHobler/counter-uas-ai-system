@@ -2,6 +2,11 @@
 
 A distributed drone detection and tracking pipeline. A lightweight edge node runs on a Raspberry Pi 5 for low-latency field inference, while a heavier ground station PC performs thorough analysis in parallel. Both nodes stream their tracks to a central telemetry server, which broadcasts a unified real-time feed to any connected dashboard.
 
+## Demonstration on publicly accesible drone videos: 
+https://github.com/user-attachments/assets/e6949b60-a529-4d16-bb8c-a7056a93df6b
+
+<img width="1280" height="720" alt="thumbnail_1_0 0s (1)" src="https://github.com/user-attachments/assets/5c2f93f9-73d7-47d0-b696-a6601aa10b6c" />
+
 ---
 
 ## 🏗️ Architecture
