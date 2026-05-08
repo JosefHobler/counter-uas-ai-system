@@ -1,6 +1,6 @@
 # Counter-UAS AI System
 
-A distributed drone detection and tracking pipeline. A lightweight edge node runs on a Raspberry Pi 5 for low-latency field inference, while a heavier ground station PC performs thorough analysis in parallel. Both nodes stream their tracks to a central telemetry server, which broadcasts a unified real-time feed to any connected dashboard.
+A distributed drone detection and tracking pipeline. A lightweight edge node designed for a Raspberry Pi 5 handles low-latency field inference, while a heavier ground station PC performs thorough analysis in parallel. Both nodes stream their tracks to a central telemetry server, which broadcasts a unified real-time feed to any connected dashboard.
 
 ## Demonstration on publicly accesible drone videos (Edge model deployable on Raspberry Pi 5): 
 https://github.com/user-attachments/assets/e6949b60-a529-4d16-bb8c-a7056a93df6b
