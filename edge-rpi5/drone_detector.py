@@ -7,6 +7,7 @@ Optional NIR fusion adds a lightweight second sensor branch.
 
 import argparse
 import math
+import os
 import sys
 import time
 import threading
@@ -17,7 +18,10 @@ import numpy as np
 
 import config
 from tracker import CentroidTracker
-from telemetry_client import TelemetryClient
+
+# Make the repo-root `common` package importable when run from edge-rpi5/.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common.telemetry import TelemetryClient
 
 _yolo_model = None
 
@@ -1168,7 +1172,7 @@ def main():
                         "sensor": getattr(obj, "sensor", "YOLO")
                     })
             if out_tracks:
-                telemetry.send_telemetry(out_tracks)
+                telemetry.send(out_tracks)
 
         display_mode = "YOLO"
         if use_nir:

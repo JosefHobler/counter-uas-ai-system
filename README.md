@@ -64,12 +64,12 @@ This is an active work-in-progress portfolio project. To keep the docs honest, h
 ```
 ├── common/                     # Shared code imported by both nodes
 │   ├── schemas.py              # Pydantic telemetry contract (single source of truth)
+│   ├── telemetry.py            # Non-blocking HTTP track sender (used by both nodes)
 │   └── merge.py                # Cross-sender track merger (global IDs)
 │
 ├── edge-rpi5/                  # Lightweight edge detection node
 │   ├── drone_detector.py       # Main pipeline entrypoint (CLI)
 │   ├── tracker.py              # Centroid + Kalman tracker
-│   ├── telemetry_client.py     # Non-blocking HTTP track sender
 │   ├── config.py               # All tunable parameters
 │   └── best.onnx               # Compact ONNX model weights
 │

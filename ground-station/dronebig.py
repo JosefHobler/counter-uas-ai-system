@@ -9,71 +9,19 @@ Usage:
 """
 
 import argparse
+import os
+import sys
+
 import cv2
 import numpy as np
 import supervision as sv
 from sahi import AutoDetectionModel
 from sahi.predict import get_sliced_prediction
 import torch
-import requests
-import threading
-import queue
-import time
 
-
-class MiniTelemetryClient:
-    """Fire-and-forget telemetry sender running on a background thread.
-
-    The queue is capped to prevent backlog accumulation when the server
-    is slow or unreachable. Oldest frames are silently dropped on overflow.
-    """
-
-    def __init__(self, endpoint_url: str, sender_id: str):
-        self.endpoint_url = endpoint_url
-        self.sender_id = sender_id
-        self.q = queue.Queue(maxsize=10)
-        self.running = True
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-
-    def _run(self):
-        while self.running:
-            try:
-                payload = self.q.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            if payload is None:
-                break
-            try:
-                requests.post(self.endpoint_url, json=payload, timeout=0.5)
-            except requests.exceptions.RequestException:
-                # Drops are expected in degraded network conditions.
-                pass
-            finally:
-                self.q.task_done()
-
-    def send(self, tracks):
-        if not self.running:
-            return
-        payload = {"sender_id": self.sender_id, "timestamp": time.time(), "tracks": tracks}
-        # Drop oldest frame if queue is full to prevent backlog.
-        if self.q.full():
-            try:
-                self.q.get_nowait()
-            except queue.Empty:
-                pass
-        try:
-            self.q.put_nowait(payload)
-        except queue.Full:
-            pass
-
-    def stop(self):
-        self.running = False
-        try:
-            self.q.put_nowait(None)
-        except queue.Full:
-            pass
-        self.thread.join(timeout=1.0)
+# Make the repo-root `common` package importable when run from ground-station/.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common.telemetry import TelemetryClient
 
 
 def parse_args():
@@ -157,7 +105,7 @@ def main():
 
     print(f"Processing {width}x{height} @ {fps} FPS -> {args.output}")
 
-    telemetry = MiniTelemetryClient(args.server, "base-station-sahi")
+    telemetry = TelemetryClient(args.server, "base-station-sahi")
 
     frame_count = 0
     while cap.isOpened():
