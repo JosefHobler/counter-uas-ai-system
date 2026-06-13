@@ -1,11 +1,16 @@
 import asyncio
 import json
+import os
+import sys
 import time
-from typing import List, Dict, Any
+from typing import Any, Dict
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+
+# Make the repo-root `common` package importable when run as `python server.py`.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common.schemas import TelemetryPayload  # noqa: E402
 
 app = FastAPI(title="Anti-Drone Ground Station API")
 
@@ -17,11 +22,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-class TelemetryPayload(BaseModel):
-    sender_id: str
-    tracks: List[Dict[str, Any]]
-    timestamp: float = None
 
 class ConnectionManager:
     def __init__(self):
@@ -55,20 +55,23 @@ async def receive_telemetry(payload: TelemetryPayload):
     Edge nodes and ground trackers POST their active targets here.
     """
     ts = payload.timestamp or time.time()
-    
+
+    # Tracks arrive already validated against the shared contract; store them
+    # as plain dicts so the rest of the pipeline stays JSON-serializable.
+    tracks = [track.model_dump() for track in payload.tracks]
+
     # Update global state
     latest_telemetry[payload.sender_id] = {
         "timestamp": ts,
-        "tracks": payload.tracks,
+        "tracks": tracks,
         "sender_id": payload.sender_id
     }
-    
+
     # Tell connected dashboard clients immediately
-    # You can merge or aggregate here depending on UI needs
     broadcast_msg = json.dumps({
         "type": "telemetry_update",
         "sender_id": payload.sender_id,
-        "tracks": payload.tracks,
+        "tracks": tracks,
         "timestamp": ts
     })
     

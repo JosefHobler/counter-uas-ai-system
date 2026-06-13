@@ -225,11 +225,15 @@ def main():
                 conf = float(tracked_detections.confidence[i])
                 out_tracks.append({
                     "id": int(tracked_detections.tracker_id[i]),
-                    "x": tcx, "y": tcy, "w": x2 - x1, "h": y2 - y1,
-                    "az": az, "el": el,
+                    "x": float(tcx), "y": float(tcy),
+                    "w": float(x2 - x1), "h": float(y2 - y1),
+                    "az": float(az), "el": float(el),
                     "confidence": conf,
-                    "threat_score": 50,
-                    "threat_state": "STABLE",
+                    # This tracker has no depth proxy, so it does not estimate a
+                    # threat. Emit a neutral, in-range value rather than a bogus
+                    # one (was threat_score=50, out of the contract's [0,1]).
+                    "threat_score": 0.0,
+                    "threat_state": "UNKNOWN",
                     "sensor": "BASE-SAHI"
                 })
             if out_tracks:
