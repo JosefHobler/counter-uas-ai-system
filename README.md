@@ -67,6 +67,8 @@ This is an active work-in-progress portfolio project. To keep the docs honest, h
 │   ├── telemetry.py            # Non-blocking HTTP track sender (used by both nodes)
 │   └── merge.py                # Cross-sender track merger (global IDs)
 │
+├── tests/                      # Unit tests (pytest)
+│
 ├── edge-rpi5/                  # Lightweight edge detection node
 │   ├── drone_detector.py       # Main pipeline entrypoint (CLI)
 │   ├── tracker.py              # Centroid + Kalman tracker
@@ -93,6 +95,19 @@ pip install -r requirements.txt
 > The edge node requires `edge-rpi5/best.onnx`.
 > The ground station tracker requires `ground-station/best.pt`.
 > Both accept any YOLO-compatible weights. Update `YOLO_MODEL` in `config.py` to point to a custom path.
+
+---
+
+## 🧪 Tests
+
+A unit-test suite covers the pure-logic pieces — the telemetry contract, the
+cross-sender track merger, the centroid tracker's matching and bbox-growth
+threat heuristic, and the detector's geometry/scoring helpers. None of the
+tests need the model weights or a camera, so they run anywhere:
+
+```bash
+pytest
+```
 
 ---
 

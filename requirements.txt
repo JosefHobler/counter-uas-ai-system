@@ -1,11 +1,15 @@
-opencv-python
-numpy
-ultralytics
-onnxruntime
-fastapi
-uvicorn
-supervision
-sahi
-requests
-torch
-pydantic
+# Runtime dependencies (pinned to the versions this was developed and tested against).
+opencv-python==4.11.0.86
+numpy==2.2.6
+ultralytics==8.4.24
+onnxruntime==1.23.2
+fastapi==0.136.0
+uvicorn==0.44.0
+supervision==0.27.0.post2
+sahi==0.11.36
+requests==2.33.1
+torch==2.11.0
+pydantic==2.13.2
+
+# Tests
+pytest==9.0.3
