@@ -1,6 +1,6 @@
 # Counter-UAS AI System
 
-A distributed drone detection and tracking pipeline. A lightweight edge node — sized to target a Raspberry Pi 5 — handles low-latency field inference, while a heavier ground station PC performs thorough analysis in parallel. Both nodes stream their tracks to a central telemetry server, which broadcasts a unified real-time feed to any connected dashboard.
+A distributed drone detection and tracking pipeline. A lightweight edge node — sized to target a Raspberry Pi 5 — handles low-latency field inference, while a heavier ground station PC performs thorough analysis in parallel. Both nodes stream their tracks to a central telemetry server, which relays them in real time to any connected dashboard.
 
 ## Demonstration on publicly accesible drone videos (Edge model designed to target Raspberry Pi 5): 
 https://github.com/user-attachments/assets/e6949b60-a529-4d16-bb8c-a7056a93df6b
@@ -37,8 +37,25 @@ https://github.com/user-attachments/assets/e6949b60-a529-4d16-bb8c-a7056a93df6b
 
 1. **Edge node** — runs a compact ONNX model with frame-skipping and motion-guided SAHI cropping to stay fast without a GPU, sized to target a Raspberry Pi 5 (tested on PC). Detected tracks are POSTed to the ground station server over the local network.
 2. **Ground station AI** (`dronebig.py`) — a heavier PyTorch model with full SAHI grid scans runs on a PC for maximum detection sensitivity. It also POSTs its tracks to the same server.
-3. **Telemetry server** (`server.py`) — a FastAPI broker that merges tracks from every sender into a single global state and broadcasts live updates to the dashboard over WebSocket. The server doesn't care whether a track came from the Pi or the PC.
-4. **Dashboard** — any WebSocket-capable client connects to `/ws/radar` and receives a unified, real-time radar feed.
+3. **Telemetry server** (`server.py`) — a FastAPI broker that collects the latest tracks from every sender and broadcasts live updates to the dashboard over WebSocket. The server doesn't care whether a track came from the Pi or the PC. *(Cross-sender track merging into a single fused list is a work in progress — see [Status & Limitations](#-status--limitations).)*
+4. **Dashboard** — any WebSocket-capable client connects to `/ws/radar` and receives a real-time radar feed of every sender's tracks.
+
+---
+
+## ✅ Status & Limitations
+
+This is an active work-in-progress portfolio project. To keep the docs honest, here is what works today versus what is still stubbed or unverified.
+
+**Working**
+- **Edge detector** — ONNX YOLO inference, motion-guided SAHI cropping, Kalman + centroid tracking, a bounding-box-growth threat estimate, the HUD overlay, and non-blocking telemetry.
+- **Ground-station tracker** (`dronebig.py`) — PyTorch YOLO with SAHI slicing and ByteTrack, forwarding tracks to the server.
+- **Telemetry server** — ingest, per-sender latest-state, and REST + WebSocket fan-out to dashboards.
+
+**Work in progress / not yet implemented**
+- **Cross-sender track merging.** The server currently stores and relays each sender's tracks *separately*; it does not yet associate or de-duplicate a target that the edge node and the ground station see at the same time. The dashboard receives per-sender tracks, not one fused list.
+- **NIR sensor fusion.** The fusion code path exists (`fuse_detections`), but no NIR detector is wired in — the NIR candidate list is always empty, so an NIR source currently has no effect on detection.
+- **Ground-station threat scoring.** `dronebig.py` emits a placeholder threat value; only the edge node computes a real bounding-box-growth threat estimate.
+- **Not benchmarked on Raspberry Pi 5.** Developed and tested on a PC; on-device latency and throughput are unverified.
 
 ---
 
