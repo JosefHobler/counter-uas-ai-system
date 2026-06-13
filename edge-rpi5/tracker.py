@@ -55,7 +55,9 @@ class TrackedObject:
 
     def predict(self):
         predicted = self.kf.predict()
-        return float(predicted[0]), float(predicted[1])
+        # predict() returns a (4, 1) column vector; index to a scalar before
+        # float() (float() on a 1-element array is deprecated in NumPy >= 1.25).
+        return float(predicted[0, 0]), float(predicted[1, 0])
 
     def correct(self, cx, cy):
         measurement = np.array([[cx], [cy]], dtype=np.float32)
