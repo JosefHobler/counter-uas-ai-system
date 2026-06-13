@@ -37,8 +37,8 @@ https://github.com/user-attachments/assets/e6949b60-a529-4d16-bb8c-a7056a93df6b
 
 1. **Edge node** — runs a compact ONNX model with frame-skipping and motion-guided SAHI cropping to stay fast without a GPU, sized to target a Raspberry Pi 5 (tested on PC). Detected tracks are POSTed to the ground station server over the local network.
 2. **Ground station AI** (`dronebig.py`) — a heavier PyTorch model with full SAHI grid scans runs on a PC for maximum detection sensitivity. It also POSTs its tracks to the same server.
-3. **Telemetry server** (`server.py`) — a FastAPI broker that collects the latest tracks from every sender and broadcasts live updates to the dashboard over WebSocket. The server doesn't care whether a track came from the Pi or the PC. *(Cross-sender track merging into a single fused list is a work in progress — see [Status & Limitations](#-status--limitations).)*
-4. **Dashboard** — any WebSocket-capable client connects to `/ws/radar` and receives a real-time radar feed of every sender's tracks.
+3. **Telemetry server** (`server.py`) — a FastAPI broker that collects the latest tracks from every sender, **fuses them into a single global-track list with stable IDs** (`common/merge.py`), and broadcasts live updates to the dashboard over WebSocket. The server doesn't care whether a track came from the Pi or the PC.
+4. **Dashboard** — any WebSocket-capable client connects to `/ws/radar` and receives both the raw per-sender tracks and the merged, unified radar feed.
 
 ---
 
@@ -49,10 +49,10 @@ This is an active work-in-progress portfolio project. To keep the docs honest, h
 **Working**
 - **Edge detector** — ONNX YOLO inference, motion-guided SAHI cropping, Kalman + centroid tracking, a bounding-box-growth threat estimate, the HUD overlay, and non-blocking telemetry.
 - **Ground-station tracker** (`dronebig.py`) — PyTorch YOLO with SAHI slicing and ByteTrack, forwarding tracks to the server.
-- **Telemetry server** — ingest, per-sender latest-state, and REST + WebSocket fan-out to dashboards.
+- **Telemetry server** — validated ingest, per-sender latest-state, **cross-sender track merging into a unified global-track list with stable IDs**, and REST + WebSocket fan-out to dashboards.
 
 **Work in progress / not yet implemented**
-- **Cross-sender track merging.** The server currently stores and relays each sender's tracks *separately*; it does not yet associate or de-duplicate a target that the edge node and the ground station see at the same time. The dashboard receives per-sender tracks, not one fused list.
+- **Calibrated multi-view fusion.** Cross-sender merging works, but it associates purely in each sender's reported azimuth/elevation and assumes the senders share an angular frame. There is no extrinsic calibration or world-coordinate projection, so merged tracks live in angular space only (no fused pixel/world position) — see the caveat in `common/merge.py`.
 - **NIR sensor fusion.** The fusion code path exists (`fuse_detections`), but no NIR detector is wired in — the NIR candidate list is always empty, so an NIR source currently has no effect on detection.
 - **Ground-station threat scoring.** `dronebig.py` emits a placeholder threat value; only the edge node computes a real bounding-box-growth threat estimate.
 - **Not benchmarked on Raspberry Pi 5.** Developed and tested on a PC; on-device latency and throughput are unverified.
@@ -62,6 +62,10 @@ This is an active work-in-progress portfolio project. To keep the docs honest, h
 ## 📁 Project Structure
 
 ```
+├── common/                     # Shared code imported by both nodes
+│   ├── schemas.py              # Pydantic telemetry contract (single source of truth)
+│   └── merge.py                # Cross-sender track merger (global IDs)
+│
 ├── edge-rpi5/                  # Lightweight edge detection node
 │   ├── drone_detector.py       # Main pipeline entrypoint (CLI)
 │   ├── tracker.py              # Centroid + Kalman tracker
@@ -70,7 +74,7 @@ This is an active work-in-progress portfolio project. To keep the docs honest, h
 │   └── best.onnx               # Compact ONNX model weights
 │
 └── ground-station/             # Heavy AI node + telemetry server
-    ├── server.py               # FastAPI broker (REST + WebSocket)
+    ├── server.py               # FastAPI broker (REST + WebSocket + merge)
     ├── dronebig.py             # High-accuracy SAHI tracker (CLI)
     └── best.pt                 # Full PyTorch model weights
 ```
@@ -163,9 +167,10 @@ Starts on **`http://0.0.0.0:8000`**. Both the edge node and the ground station t
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/api/telemetry` | Ingest a track payload from any sender |
-| `GET` | `/api/state` | Pull the full latest state for all senders (use on dashboard init) |
-| `WebSocket` | `/ws/radar` | Real-time stream — sends `full_state` on connect, then `telemetry_update` per POST |
+| `POST` | `/api/telemetry` | Ingest a track payload from any sender (validated against the shared schema) |
+| `GET` | `/api/state` | Pull the full latest *per-sender* state (use on dashboard init) |
+| `GET` | `/api/unified` | Pull the latest *merged* global-track list (one entry per physical target) |
+| `WebSocket` | `/ws/radar` | Real-time stream — sends `full_state` on connect, then `telemetry_update` per POST. Both messages carry a `unified` field with the merged tracks. |
 
 #### Telemetry payload schema
 
@@ -183,6 +188,26 @@ Starts on **`http://0.0.0.0:8000`**. Both the edge node and the ground station t
       "threat_score": 0.42,
       "threat_state": "APPROACHING"
     }
+  ]
+}
+```
+
+#### Unified track shape
+
+The server fuses every sender's tracks into a global list (`/api/unified`, and the `unified` field on WebSocket messages). Each merged track is reported in the angular frame only:
+
+```json
+{
+  "global_id": 1,
+  "az": 10.47,  "el": 2.18,
+  "confidence": 0.90,
+  "threat_score": 0.40,
+  "threat_state": "APPROACHING",
+  "sensors": ["BASE-SAHI", "RGB"],
+  "num_sensors": 2,
+  "sources": [
+    { "sender_id": "edge-rpi5-alpha", "id": 1 },
+    { "sender_id": "base-station-sahi", "id": 7 }
   ]
 }
 ```
