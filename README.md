@@ -19,7 +19,7 @@ https://github.com/user-attachments/assets/e6949b60-a529-4d16-bb8c-a7056a93df6b
 │  • ONNX model  (9.8 MB)      │         │  • Aggregates tracks  • PyTorch model   │
 │  • Motion-smart SAHI crops   │ ──────► │    from all senders     (53 MB)         │
 │  • Kalman + centroid tracker │         │  • Holds global state • Full SAHI scan  │
-│  • NIR sensor fusion         │         │  • REST + WebSocket   • Heavier, GPU-  │
+│                              │         │  • REST + WebSocket   • Heavier, GPU-  │
 │  • Sends tracks → server     │         │    for dashboard        capable node    │
 └──────────────────────────────┘         └───────────────┬────────────────────────┘
                                                          │  WebSocket  /ws/radar
@@ -32,7 +32,7 @@ https://github.com/user-attachments/assets/e6949b60-a529-4d16-bb8c-a7056a93df6b
 
 **How it works:**
 
-1. **Edge node** — the Pi 5 runs a compact ONNX model with frame-skipping and motion-guided SAHI cropping to stay fast without a GPU. It optionally fuses a second NIR camera feed. Detected tracks are POSTed to the ground station server over the local network.
+1. **Edge node** — the Pi 5 runs a compact ONNX model with frame-skipping and motion-guided SAHI cropping to stay fast without a GPU. Detected tracks are POSTed to the ground station server over the local network.
 2. **Ground station AI** (`dronebig.py`) — a heavier PyTorch model with full SAHI grid scans runs on a PC for maximum detection sensitivity. It also POSTs its tracks to the same server.
 3. **Telemetry server** (`server.py`) — a FastAPI broker that merges tracks from every sender into a single global state and broadcasts live updates to the dashboard over WebSocket. The server doesn't care whether a track came from the Pi or the PC.
 4. **Dashboard** — any WebSocket-capable client connects to `/ws/radar` and receives a unified, real-time radar feed.
@@ -86,17 +86,6 @@ cd edge-rpi5
 python drone_detector.py --source "your_video.mp4" --mode day
 ```
 
-### RGB + NIR fusion with threat scoring (real-time)
-
-```bash
-python drone_detector.py \
-    --source "rgb_cam.mp4" \
-    --nir-source "nir_cam.mp4" \
-    --mode day \
-    --nir-mode night \
-    --threat
-```
-
 ### Export annotated video (offline mode)
 
 ```bash
@@ -119,12 +108,9 @@ python drone_detector.py --source 0 --mode day
 | Flag | Default | Description |
 |---|---|---|
 | `--source` | *(config value)* | RGB video file path or integer camera index |
-| `--nir-source` | *(none)* | NIR video or camera. Enables sensor fusion when provided. |
 | `--mode` | *(config value)* | RGB preprocessing: `day`, `night`, or `thermal` |
-| `--nir-mode` | `night` | NIR preprocessing: `day`, `night`, or `thermal` |
 | `--profile` | `default` | Performance profile: `default`, `balanced`, or `pi5` |
 | `--threat` | off | Show threat assessment overlay (approaching / receding) |
-| `--show-nir` | off | Open a separate debug window for the NIR feed |
 | `--show-profile` | off | Print per-stage timing to console every second |
 | `--no-real-time` | off | Synchronous frame processing (offline / export mode) |
 | `--output` | *(none)* | Save annotated output video. Implies `--no-real-time`. |
@@ -135,7 +121,6 @@ python drone_detector.py --source 0 --mode day
 |---|---|
 | `q` | Quit |
 | `n` | Cycle RGB mode (day → night → thermal) |
-| `i` | Toggle NIR debug window |
 | `+` / `=` | Raise YOLO confidence threshold by 0.05 |
 | `-` | Lower YOLO confidence threshold by 0.05 |
 
@@ -176,8 +161,7 @@ Starts on **`http://0.0.0.0:8000`**. Both the edge node and the ground station t
       "az": 12.5,  "el": -3.1,
       "confidence": 0.87,
       "threat_score": 0.42,
-      "threat_state": "APPROACHING",
-      "sensor": "RGB+NIR"
+      "threat_state": "APPROACHING"
     }
   ]
 }
@@ -214,7 +198,6 @@ All edge node parameters live in `edge-rpi5/config.py`:
 | **SAHI** | `SAHI_ENABLED`, `SAHI_SLICE_WIDTH/HEIGHT`, `SAHI_OVERLAP_RATIO`, `SAHI_MOTION_SMART_CROP` |
 | **Tracker** | `MAX_DISTANCE`, `MAX_DISAPPEARED`, `MAX_PREDICTED_FRAMES`, `TRACK_HISTORY` |
 | **Kalman** | `KALMAN_PROCESS_NOISE`, `KALMAN_MEASUREMENT_NOISE` |
-| **Fusion** | `FUSION_RGB_WEIGHT`, `FUSION_NIR_WEIGHT`, `FUSION_BONUS`, `FUSION_CONFIRM_THRESHOLD` |
 | **Night/IR** | `CLAHE_CLIP_LIMIT`, `CLAHE_GRID_SIZE`, `THERMAL_COLORMAP` |
 | **HUD** | `COLOR_CROSSHAIR`, `HUD_FONT_SCALE`, `HUD_THICKNESS` |
 | **Networking** | `GROUND_STATION_URL`, `NODE_ID` |
