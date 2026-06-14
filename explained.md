@@ -22,69 +22,84 @@ feature. Read top-to-bottom for a tour, or jump to a section.
 
 ## 1. What this project is
 
-A **distributed drone-detection and tracking pipeline** ("Counter-UAS" =
-Counter–Unmanned Aerial System). It has three moving parts:
+A **distributed drone-detection pipeline** ("Counter-UAS" = Counter–Unmanned
+Aerial System) built around a **cue / confirm** design. It has these moving
+parts:
 
-1. A **lightweight edge node** meant to run in the field (sized to target a
-   Raspberry Pi 5) that does fast, low-latency detection on a camera feed.
-2. A **heavier ground-station node** on a PC that runs a bigger, more accurate
-   model on the same kind of footage.
-3. A **telemetry server** that both nodes report to. It collects everyone's
-   tracks, fuses them into one global picture, and streams that picture to any
-   connected dashboard in real time.
+1. A **lightweight edge node** meant to run in the field on a drone (sized to
+   target a Raspberry Pi 5) that does fast, low-latency detection on a camera
+   feed and **cues** drone-like candidates.
+2. A **ground confirm service** (a Jetson Orin NX–class GPU box) that runs a
+   bigger, more accurate model **only on the cropped candidates** the edge sends,
+   and decides whether each one is really a drone.
+3. A **telemetry server / broker** that collects the edge's telemetry and the
+   ground's confirmations and streams them to any connected dashboard in real
+   time.
+
+The core idea: the cheap edge stage is tuned for **high recall** (better to
+over-flag than miss); the heavy ground stage is the **judge** that rejects false
+positives — and only small crops, not full video, cross the link.
+
+There is also a **secondary** capability: a standalone heavy tracker
+(`dronebig.py`) can post its own tracks, and the broker can merge tracks from
+multiple senders into a unified list. That path is separate from cue/confirm and
+is angular-only, best-effort (see §6 and §10).
 
 The dashboard UI itself lives in a **separate repository** — this repo is the
 detection + telemetry backend, plus the models.
 
-It is a **portfolio / work-in-progress project**, not a deployed product.
-Section 10 is explicit about what genuinely works versus what is stubbed.
+It is a **work-in-progress project**, bench-verified but not yet deployed to the
+target hardware. Section 10 is explicit about what genuinely works versus what
+is stubbed.
 
 ---
 
 ## 2. The big picture (architecture & data flow)
 
-There are two **senders** (detectors) and one **server**. Both senders POST to
-the same server; the server never POSTs to anyone — it broadcasts over a
-WebSocket.
+The primary flow is **cue → confirm**: the edge crops a drone-like candidate and
+sends it to the confirm service, which runs the heavy model and posts a verdict
+to the broker, which fans everything out to dashboards over a WebSocket.
 
 ```
-        SENDERS (run the AI)                          SERVER                 CONSUMER
+   EDGE (Pi 5, on the drone)                  GROUND (Jetson Orin NX class)
 ┌──────────────────────────────┐
-│  EDGE NODE (target: Pi 5)    │
-│  edge-rpi5/drone_detector.py │ ─┐
-│   • compact ONNX YOLO        │  │
-│   • motion-guided SAHI crops │  │
-│   • Kalman + centroid tracker│  │  HTTP POST
-│   • bbox-growth threat score │  │  /api/telemetry
-│   • HUD overlay              │  │
-└──────────────────────────────┘  │     ┌────────────────────────────────────┐
-                                   ├───► │  ground-station/server.py          │
-┌──────────────────────────────┐  │     │   • validates every payload        │
-│  GROUND TRACKER (PC)         │  │     │   • stores latest state per sender │      ┌──────────────┐
-│  ground-station/dronebig.py  │ ─┘     │   • MERGES all senders → global    │ ───► │ Dashboard UI │
-│   • heavy PyTorch YOLO + SAHI│        │   • REST + WebSocket fan-out       │  WS  │ (separate    │
-│   • ByteTrack for stable IDs │        └────────────────────────────────────┘ /ws/ │  repo)       │
-└──────────────────────────────┘                                               radar └──────────────┘
+│ edge-rpi5/drone_detector.py  │  candidate   ┌──────────────────────────────┐
+│  • compact ONNX YOLO         │    crop      │ ground-station/               │
+│  • frame-skip + SAHI crops   │ ───────────► │   confirm_service.py          │
+│  • Kalman + centroid tracker │/api/candidate│   • heavy PyTorch YOLO        │
+│  • cues drone-like regions   │              │   • verdict: drone or not     │
+└───────────────┬──────────────┘              └───────────────┬──────────────┘
+                │ telemetry tracks                             │ confirmation
+                │ /api/telemetry                               │ /api/confirmation
+                ▼                                              ▼
+        ┌─────────────────────────────────────────────────────────────┐
+        │ ground-station/server.py  — FastAPI broker                   │
+        │  • validates ingest  • holds state  • REST + WebSocket        │
+        └────────────────────────────────┬─────────────────────────────┘
+                                          │ WebSocket /ws/radar
+                                          ▼
+                                 ┌─────────────────────┐
+                                 │  Dashboard UI       │
+                                 │  (separate repo)    │
+                                 └─────────────────────┘
 ```
 
-`dronebig.py` lives in the `ground-station/` folder only because it's meant to
-run on the same PC as the server — but it is a **client of the server**, exactly
-like the edge node. It runs the AI and POSTs its tracks to `server.py`. There is
-no `dronebig.py → dronebig.py` link.
+**The cue/confirm flow, in one paragraph:** The edge detector processes frames,
+tracks targets, and (when `--confirm-url` is set) crops each drone-like candidate
+and POSTs the crop to the confirm service at `/api/candidate`. The confirm
+service decodes the crop, runs the heavy model on it, maps any detected box back
+to full-frame coordinates, and returns a `Confirmation` (drone or not) — which it
+also forwards to the broker at `/api/confirmation`. The edge separately POSTs its
+own tracks as telemetry. The broker validates every payload, stores the latest
+state, and broadcasts telemetry updates and confirmations to all connected
+dashboards over the WebSocket. A dashboard that connects mid-stream first gets a
+full snapshot, then live updates.
 
-**The flow, in one paragraph:** Each detection node (the edge detector and the
-ground tracker) processes video frames, produces a list of tracks (one per
-object it currently sees), and POSTs them to the server's `/api/telemetry`
-endpoint. The server validates each payload against a shared schema, remembers
-the latest tracks from each sender, re-runs a **merge** step that fuses tracks
-from different senders that point at the same physical target, and then
-broadcasts both the raw per-sender update and the merged "unified" list to every
-connected dashboard over a WebSocket. A dashboard that connects mid-stream first
-gets a full snapshot, then live updates.
-
-Note the key asymmetry: **`dronebig.py` is a sender, not the server.**
-`server.py` is the only server. Both `drone_detector.py` and `dronebig.py` are
-clients that push data to it.
+**Who is a server vs. a client:** `server.py` is the broker (receives, never
+initiates). `confirm_service.py` is *both* — an HTTP server to the edge (receives
+crops) and a client to the broker (forwards verdicts). `drone_detector.py` is a
+pure client. `dronebig.py` (the standalone tracker, secondary path) is also a
+pure client that posts telemetry to the broker.
 
 ---
 
@@ -94,23 +109,28 @@ clients that push data to it.
 drones/
 ├── common/                     # Shared code imported by BOTH nodes
 │   ├── __init__.py             # marks it a package; explains the "why share"
-│   ├── schemas.py              # Pydantic telemetry contract (single source of truth)
-│   ├── telemetry.py            # Non-blocking HTTP track sender (used by both nodes)
-│   └── merge.py                # Cross-sender track merger (assigns global IDs)
+│   ├── schemas.py              # Pydantic contracts: telemetry + candidate/confirmation
+│   ├── telemetry.py            # AsyncPoster (non-blocking POST worker) + TelemetryClient
+│   ├── candidates.py           # Candidate-crop packing + non-blocking CandidateSender
+│   ├── geometry.py             # Pure box math: IoU, crop region, coord mapping, association
+│   └── merge.py                # Cross-sender track merger (angular, global IDs) — secondary path
 │
-├── edge-rpi5/                  # The lightweight edge detection node
-│   ├── drone_detector.py       # Main pipeline + CLI (the big one, ~1260 lines)
+├── edge-rpi5/                  # The lightweight edge node (cues candidates)
+│   ├── drone_detector.py       # Main pipeline + CLI (the big one, ~1300 lines)
 │   ├── tracker.py              # Centroid + Kalman per-frame tracker
 │   ├── config.py               # All tunable parameters in one place
 │   └── best.onnx               # Compact ONNX model weights (~9.8 MB)
 │
-├── ground-station/             # The heavy AI node + the telemetry server
-│   ├── server.py               # FastAPI broker (REST + WebSocket + merge)
-│   ├── dronebig.py             # High-accuracy SAHI + ByteTrack tracker (a sender)
+├── ground-station/             # The heavy AI node + the broker
+│   ├── server.py               # FastAPI broker (telemetry + confirmations, REST + WebSocket)
+│   ├── confirm_service.py      # Heavy-model confirm service (receives crops → verdicts)
+│   ├── dronebig.py             # Standalone SAHI + ByteTrack tracker; shares model code
 │   └── best.pt                 # Full PyTorch model weights (~53 MB)
 │
 ├── tests/                      # Unit tests (pytest) — pure logic, no weights/camera
-│   ├── test_schemas.py         # contract validation incl. the threat_score=50 bug
+│   ├── test_schemas.py         # telemetry + candidate/confirmation contract validation
+│   ├── test_geometry.py        # IoU, crop region, coord mapping, IoU association
+│   ├── test_candidates.py      # candidate-crop packing + JPEG round-trip
 │   ├── test_merge.py           # cross-sender merging behaviour
 │   ├── test_tracker.py         # tracker matching + threat heuristic
 │   └── test_detector_math.py   # bbox_iou / clamp01 / detection_priority
@@ -122,9 +142,8 @@ drones/
 └── *.mp4                        # Sample / demo videos
 ```
 
-The three top-level code folders map exactly to the three architecture boxes:
-`common/` is the shared contract, `edge-rpi5/` is the field box, `ground-station/`
-is the PC box.
+`common/` is the shared contract + helpers, `edge-rpi5/` is the field box (the
+cue), `ground-station/` is the GPU box (the confirm + broker).
 
 ---
 
@@ -161,33 +180,69 @@ important file for understanding what data flows around the system.
   `sender_id` (non-empty string), `tracks` (a list of `Track`), and an optional
   `timestamp`.
 
+It also defines the **cue/confirm** contract:
+
+- **`BBox`** — a simple `(x, y, w, h)` pixel box, reused below.
+- **`CandidateCrop`** — what the edge ships to the confirm service: `sender_id`,
+  `candidate_id`, `frame_id`, optional `track_id`, the candidate `bbox` (in
+  full-frame coords), the crop origin (`crop_x`, `crop_y`) and size, the edge
+  `confidence`, and the crop itself as a base64 JPEG (`image_jpeg_b64`). The
+  origin is carried so the confirm service can map a box it finds *inside* the
+  crop back to full-frame coordinates.
+- **`Confirmation`** — the ground verdict: echoes `candidate_id` / `track_id` (so
+  it can be tied back to the edge track), plus `is_drone`, `label`, `confidence`,
+  and a tight `bbox` (present only when `is_drone`).
+
 **Why this matters:** the bounds (`ge=0.0, le=1.0`) mean a malformed value like
 `threat_score=50` is rejected *at the door* instead of poisoning the dashboard.
 Before this contract existed, the ground tracker shipped exactly that bad value.
-Both the producers (the two detectors) and the consumer (the server) validate
-against these same models, so the two sides physically cannot disagree about the
-format.
+Every producer and consumer validates against these same models, so the sides
+physically cannot disagree about the format.
 
-### `common/telemetry.py` — the non-blocking sender
-A single `TelemetryClient` class that both nodes use to ship tracks to the
-server **without ever stalling their frame loop**.
+### `common/telemetry.py` — non-blocking POST, shared
+Two classes that let any node ship data to the server **without ever stalling its
+frame loop**.
 
-How it works:
-- On construction it starts a background daemon thread and a bounded queue
-  (default size 10).
-- `send(tracks)` wraps the tracks in a payload (`sender_id`, `timestamp`,
-  `tracks`) and drops it on the queue. **If the queue is full it discards the
-  oldest frame** and enqueues the new one — so a slow or unreachable server can
-  never build a backlog or slow down detection.
-- The background thread drains the queue and does a `requests.post` with a short
-  timeout (0.5 s). Network errors are swallowed on purpose — in degraded network
-  conditions you'd rather drop a frame than block.
-- `stop()` cleanly shuts the worker down.
+- **`AsyncPoster`** — the generic worker. On construction it starts a background
+  daemon thread and a bounded queue (default size 10). `post(payload)` drops a
+  dict on the queue; **if the queue is full it discards the oldest** so a slow or
+  unreachable server never builds a backlog. The thread drains the queue and does
+  a `requests.post` with a short timeout (0.5 s), swallowing network errors on
+  purpose — in degraded conditions you'd rather drop a frame than block.
+  `stop()` shuts it down cleanly.
+- **`TelemetryClient`** — a thin wrapper that packs a telemetry payload
+  (`sender_id`, `timestamp`, `tracks`) and hands it to an `AsyncPoster`.
 
-This file is the result of "Task 4" in the project plan: the edge node and the
-ground tracker each used to carry their own near-identical client
-(`TelemetryClient` and `MiniTelemetryClient`). They were merged into this one
-shared implementation.
+This started as "kill the duplicated client" (the edge and ground tracker each
+had a near-identical `TelemetryClient` / `MiniTelemetryClient`). The
+`AsyncPoster` split came later so the cue/confirm `CandidateSender` and the
+confirm service's broker-forwarder reuse the *exact* same drop-oldest behavior
+instead of re-implementing it.
+
+### `common/geometry.py` — pure box math
+Dependency-free helpers (no cv2/numpy), so the math is trivially unit-tested. Box
+convention is `(x, y, w, h)` pixels.
+
+- **`bbox_iou`** — intersection-over-union; the canonical copy (the edge's
+  `drone_detector` now imports it instead of keeping its own).
+- **`clamp_crop_region`** — given a candidate box, frame size, and a margin
+  (fraction of the longer side), returns the crop rectangle, clamped to the frame.
+- **`map_local_box_to_full`** — translate a box found *inside* a crop back to
+  full-frame coordinates (crop origin + local box).
+- **`associate_by_iou`** — greedy one-to-one matching of two box lists by
+  descending IoU. This is the **single-camera** association tool: cue/confirm
+  lives in one frame, so plain pixel IoU is precise and correct — unlike the
+  angular gate the multi-sender `merge.py` needs.
+
+### `common/candidates.py` — candidate-crop transport
+The edge side of cue/confirm. Sends *crops*, not video, to keep the link light.
+
+- **`encode_jpeg_b64` / `decode_jpeg_b64`** — JPEG ↔ base64 string (cv2).
+- **`build_candidate_payload`** — the pure packer: crops `bbox` (with margin) out
+  of a frame, encodes it, and returns a `CandidateCrop`-shaped dict (returns
+  `None` if the crop would be empty). Unit-tested.
+- **`CandidateSender`** — wraps `build_candidate_payload` with an `AsyncPoster`,
+  so crops are shipped with the same non-blocking, drop-oldest delivery.
 
 ### `common/merge.py` — cross-sender track fusion
 This is the most algorithmically interesting file. It takes the per-sender
@@ -242,9 +297,11 @@ A flat module of constants, grouped by area: input/source, camera field-of-view
 (`FOV_X=80°`, `FOV_Y=50°`), YOLO settings (model path, confidence, input size,
 which classes count as drones), SAHI slicing settings, tracker settings (Kalman
 noise, max match distance, history length), multi-sensor fusion weights, night/IR
-preprocessing, HUD colours, performance profile knobs, and networking
-(`GROUND_STATION_URL`, `NODE_ID`). Everything tunable lives here so the pipeline
-code stays free of magic numbers.
+preprocessing, HUD colours, performance profile knobs, networking
+(`GROUND_STATION_URL`, `NODE_ID`), and the **cue/confirm** knobs
+(`CONFIRM_SERVICE_URL`, `CANDIDATE_EVERY_N_FRAMES` — throttle, and
+`CANDIDATE_MARGIN` — context padding around each crop). Everything tunable lives
+here so the pipeline code stays free of magic numbers.
 
 ### `edge-rpi5/tracker.py` — per-frame tracking
 Turns frame-by-frame detections into **stable tracks with persistent IDs**.
@@ -316,15 +373,25 @@ The edge entrypoint and CLI. Roughly in order:
   readouts. This is the cinematic "missile-seeker" overlay you see in the demo.
 - **`main()`** — wires it all together: parse CLI args, open the video source(s),
   loop over frames (read → preprocess → detect → track → **send telemetry** →
-  draw HUD → display/write), and handle keyboard controls (`q` quit, `n` cycle
-  mode, `+/-` confidence). For each tracked object it computes az/el from the
-  pixel offset and the camera FOV, attaches the threat assessment, and ships the
-  batch via the shared `TelemetryClient`.
+  **cue candidates** → draw HUD → display/write), and handle keyboard controls
+  (`q` quit, `n` cycle mode, `+/-` confidence). For each tracked object it
+  computes az/el from the pixel offset and the camera FOV, attaches the threat
+  assessment, and ships the batch via the shared `TelemetryClient`.
+- **Cue/confirm hook** — when `--confirm-url` is set, `main()` also builds a
+  `CandidateSender`. Throttled to every `CANDIDATE_EVERY_N_FRAMES`, it crops each
+  AI-confirmed track out of the **raw** frame (no HUD) and ships it to the confirm
+  service. (The `bbox_iou` used by NMS/dedup now comes from `common.geometry` —
+  one shared copy.)
 
 CLI flags worth knowing: `--source`, `--mode {day,night,thermal}`,
 `--profile {default,balanced,pi5}` (trades accuracy for speed),
 `--threat` (show the approach overlay), `--no-real-time` / `--output` (offline
-export), `--show-profile` (per-stage timing).
+export), `--confirm-url` (enable cue/confirm crop streaming), `--show-profile`
+(per-stage timing).
+
+> **Real-time caveat:** in real-time mode detection runs on a background thread,
+> so the box lags a fast drone and a crop from the current frame can miss it.
+> Use `--no-real-time` for clean crops, or raise `CANDIDATE_MARGIN`. (See §10.)
 
 ---
 
@@ -335,60 +402,78 @@ A small **FastAPI** app. It's the hub everything else talks to. It has no model
 and does no detection — it only ingests, merges, and broadcasts.
 
 - Global state: `latest_telemetry` (the latest payload per sender), a single
-  `TrackMerger`, and `latest_unified` (the most recent merged list).
-- **`POST /api/telemetry`** — the ingest endpoint. FastAPI validates the body
-  against `TelemetryPayload` automatically (so bad data is rejected with a 422
-  before any of our code runs). It stamps `received_at` with the server clock,
-  stores the sender's tracks, **re-runs the merge across all senders**, then
-  fires off a WebSocket broadcast containing both the raw update and the fresh
-  unified list. Returns a small ack with counts.
-- **`GET /api/state`** — the full latest per-sender state (used by a dashboard on
-  load).
-- **`GET /api/unified`** — just the latest merged global-track list.
+  `TrackMerger`, `latest_unified` (the merged list), and `latest_confirmations`
+  (the latest verdict per candidate).
+- **`POST /api/telemetry`** — ingest. FastAPI validates the body against
+  `TelemetryPayload` automatically (bad data → 422 before our code runs). It
+  stamps `received_at` with the server clock, stores the tracks, re-runs the
+  merge, and broadcasts a `telemetry_update` (raw + unified).
+- **`POST /api/confirmation`** — ingest for the confirm service. Validates against
+  `Confirmation`, stores it keyed `sender_id:candidate_id`, and broadcasts a
+  `confirmation` message.
+- **`GET /api/state`** / **`GET /api/unified`** / **`GET /api/confirmations`** —
+  pull the latest per-sender state, merged list, and confirmations respectively
+  (used by a dashboard on load).
 - **`WebSocket /ws/radar`** — the live feed. On connect a client gets a
-  `full_state` snapshot, then a `telemetry_update` message every time any sender
-  POSTs. `ConnectionManager` tracks connected clients and handles broadcast +
-  disconnect.
+  `full_state` snapshot (telemetry + unified + confirmations), then
+  `telemetry_update` per telemetry POST and `confirmation` per confirm POST.
+  `ConnectionManager` tracks clients and handles broadcast + disconnect.
 - CORS is wide open (`allow_origins=["*"]`) so the separate UI repo can connect.
 - Run with `python server.py` → serves on `0.0.0.0:8000`.
 
-### `ground-station/dronebig.py` — the heavy tracker (a sender)
-The high-accuracy counterpart to the edge node, meant for a PC. Despite living
-in `ground-station/`, it is a **telemetry sender**, just like the edge node — it
-pushes to `server.py`.
+### `ground-station/confirm_service.py` — the heavy confirm service
+The ground side of cue/confirm. A FastAPI app that is **both** a server (to the
+edge) and a client (to the broker).
 
-Pipeline per frame:
-1. Load a full **PyTorch** YOLO model via SAHI's `AutoDetectionModel` (uses CUDA
-   if available, else CPU).
-2. Run **`get_sliced_prediction`** — full SAHI grid slicing (640×640 tiles, 20%
-   overlap) for maximum sensitivity to small targets.
-3. Convert detections into the `supervision` library's format.
-4. Feed them to **ByteTrack** (`sv.ByteTrack`) for stable multi-object IDs across
-   frames — a well-regarded, off-the-shelf tracker (contrast with the edge
-   node's hand-rolled centroid+Kalman tracker).
-5. Annotate the frame, compute az/el from each box's offset and the FOV, and
-   POST the tracks via the shared `TelemetryClient` (sender id
-   `"base-station-sahi"`).
+- **`configure(...)`** loads the heavy model once (via `dronebig`'s shared
+  `load_detection_model`) and optionally wires up an `AsyncPoster` that forwards
+  verdicts to the broker.
+- **`POST /api/candidate`** — receives a `CandidateCrop`, decodes the JPEG, runs
+  the heavy model on the crop with **plain (non-sliced) inference** (a crop is
+  already small/zoomed — SAHI tiling would be wasted), picks the best detection
+  above `--drone-threshold`, maps its box back to full-frame coords with
+  `map_local_box_to_full`, and returns a `Confirmation`. It prints a one-line
+  verdict per candidate and, with `--dump-dir`, saves each annotated crop for
+  inspection.
+- Run with `python confirm_service.py --model best.pt --port 8001 --broker …`.
+
+### `ground-station/dronebig.py` — standalone heavy tracker (secondary path)
+The original high-accuracy tracker. It now plays two roles:
+
+- **Shared model code.** `load_detection_model(...)` and
+  `detect_on_image(..., sliced=True|False)` were extracted so the confirm service
+  reuses the exact same model/inference (sliced for full frames, plain for crops)
+  — no duplication.
+- **Standalone tracker (a telemetry sender).** Its `main()` reads a video, runs
+  full **SAHI** slicing per frame, feeds detections to **ByteTrack**
+  (`sv.ByteTrack`) for stable IDs, and POSTs tracks to the broker as sender
+  `"base-station-sahi"`. This is the multi-sender/merge path, separate from
+  cue/confirm.
 
 Note the explicit honesty in the code: this tracker has no depth proxy, so it
-emits `threat_score=0.0` / `threat_state="UNKNOWN"` — a neutral, in-range value.
-The comment even records that this used to be the buggy `threat_score=50` the
-contract now forbids.
+emits `threat_score=0.0` / `threat_state="UNKNOWN"` — a neutral, in-range value
+(it once was the buggy `threat_score=50` the contract now forbids).
 
 ---
 
 ## 7. The tests — `tests/` and `conftest.py`
 
-A focused **pytest** suite (28 tests) over the pure-logic pieces. None of them
+A focused **pytest** suite (51 tests) over the pure-logic pieces. None of them
 need the model weights, a camera, or a running server, so they run anywhere in
-under a second.
+about a second.
 
 - **`conftest.py`** — puts the repo root (for the `common` package) and
   `edge-rpi5/` (for `config`, `tracker`, `drone_detector`) on `sys.path`, so the
   tests can import the modules without installing anything.
-- **`test_schemas.py`** — the contract: safe defaults, and rejection of the
+- **`test_schemas.py`** — the contracts: safe defaults and rejection of the
   `threat_score=50` bug, out-of-range confidence, negative box dims, unknown
-  keys, and bad enum values; plus a round-trip dump check.
+  keys, bad enum values; plus the cue/confirm models (`CandidateCrop`,
+  `Confirmation`, `BBox`) and a round-trip dump check.
+- **`test_geometry.py`** — `bbox_iou`, `clamp_crop_region` (margin + clamping),
+  `map_local_box_to_full`, and `associate_by_iou` (greedy one-to-one matching).
+- **`test_candidates.py`** — JPEG round-trip, and `build_candidate_payload`
+  producing a dict that validates against `CandidateCrop` with the right crop
+  origin/size (off-frame boxes return `None`).
 - **`test_merge.py`** — merging: two senders on one target collapse to a single
   global track with `num_sensors=2`; targets outside the gate stay separate; two
   tracks from one sender never merge; global IDs stay stable across frames; a
@@ -456,6 +541,38 @@ What the server broadcasts over `/ws/radar` after a POST:
 Notice the merged/unified entries have **no `x`/`y`** — pixels from different
 cameras aren't comparable, so the merge lives in angular space only.
 
+**Cue/confirm.** What the edge POSTs to `/api/candidate` (`CandidateCrop`):
+
+```json
+{
+  "sender_id": "edge-rpi5-alpha",
+  "candidate_id": 5, "frame_id": 2475, "track_id": 0,
+  "timestamp": 1781432885.5,
+  "bbox": {"x": 900.0, "y": 480.0, "w": 60.0, "h": 40.0},
+  "crop_x": 876.0, "crop_y": 464.0, "crop_width": 108, "crop_height": 72,
+  "confidence": 0.41,
+  "image_jpeg_b64": "<base64 JPEG of the crop>"
+}
+```
+
+What the confirm service returns (and forwards to `/api/confirmation`) — a
+`Confirmation`:
+
+```json
+{
+  "sender_id": "edge-rpi5-alpha",
+  "candidate_id": 5, "frame_id": 2475, "track_id": 0,
+  "timestamp": 1781432885.6,
+  "is_drone": true,
+  "label": "drone",
+  "confidence": 0.89,
+  "bbox": {"x": 902.0, "y": 482.0, "w": 55.0, "h": 38.0}
+}
+```
+
+The confirmation's `bbox` is the heavy model's tight box, already mapped back to
+full-frame coordinates (crop origin + the box it found inside the crop).
+
 ---
 
 ## 9. How to run everything
@@ -478,45 +595,83 @@ python drone_detector.py --source "../2026-03-22 17-45-14.mp4" --mode day --thre
 python drone_detector.py --source "<video>" --no-real-time --output out.mp4
 ```
 
-**3. Optionally run the heavy ground tracker** (another terminal):
-```bash
-cd ground-station
-python dronebig.py --source "<video>"
-```
-
 **4. Connect a dashboard** to `ws://localhost:8000/ws/radar` (separate repo), or
 just inspect `GET http://localhost:8000/api/unified`.
+
+### The cue/confirm pipeline (the primary path)
+
+Three processes, in order: broker → confirm service → edge.
+
+```bash
+# 1. Broker
+cd ground-station && python server.py
+
+# 2. Confirm service (heavy model; receives crops, returns verdicts)
+python confirm_service.py --model best.pt --port 8001 \
+    --broker http://localhost:8000/api/confirmation
+
+# 3. Edge with crop streaming enabled
+cd ../edge-rpi5
+python drone_detector.py --source "../<video>" \
+    --confirm-url http://localhost:8001/api/candidate
+```
+
+Watch the confirm service's `[CONFIRM] cand N ... -> DRONE/no` lines, add
+`--dump-dir DIR` to save each crop, and read verdicts at
+`GET http://localhost:8000/api/confirmations`. For clean crops while testing, add
+`--no-real-time` to the edge (avoids the detection-lag described in §10).
+
+### The secondary path (standalone heavy tracker + merge)
+
+```bash
+cd ground-station
+python dronebig.py --source "<video>"   # posts its own tracks; broker merges senders
+```
 
 **Run the tests** (no weights/camera needed):
 ```bash
 pytest
 ```
 
+> On Windows the dependencies are installed under `py -3.10`; use
+> `py -3.10 …` / `py -3.10 -m pytest` if a plain `python` lacks `cv2`.
+
 ---
 
 ## 10. Status & limitations (the honest version)
 
-This is a WIP portfolio project. What's real vs. not:
+This is a WIP project. What's real vs. not:
 
 **Working today**
 - Edge detector: ONNX YOLO, motion-guided SAHI cropping, Kalman + centroid
   tracking, the bbox-growth threat estimate, the HUD, and non-blocking telemetry.
-- Ground tracker (`dronebig.py`): PyTorch YOLO + SAHI + ByteTrack, forwarding
-  tracks to the server.
-- Server: validated ingest, per-sender state, **cross-sender merge into a unified
-  global-track list with stable IDs**, and REST + WebSocket fan-out.
+- **Cue/confirm pipeline**: the edge crops candidates and ships them to
+  `confirm_service.py`, which runs the heavy model and returns a drone/not-drone
+  verdict to the broker. Verified end-to-end on the bench (the ground model
+  confirms real drones from edge-cued crops at high confidence).
+- Standalone ground tracker (`dronebig.py`): PyTorch YOLO + SAHI + ByteTrack,
+  forwarding tracks to the broker; shares its model code with the confirm service.
+- Broker: validated telemetry + confirmation ingest, per-sender state,
+  cross-sender merge into a unified list, and REST + WebSocket fan-out.
 
 **Work in progress / not implemented**
-- **Calibrated multi-view fusion.** The merge associates purely in each sender's
-  reported az/el and assumes a shared angular frame. No extrinsic calibration, no
-  world-coordinate projection — merged tracks are angular-only.
+- **Detection latency vs. fast targets.** In real-time mode the edge runs
+  detection on a background thread, so the box lags the drone and a crop from the
+  current frame can miss a fast mover. Mitigated by `--no-real-time` or a wider
+  `CANDIDATE_MARGIN`; proper motion-prediction of the crop region isn't built.
+- **Calibrated multi-view fusion** (secondary path). The merge associates purely
+  in each sender's reported az/el and assumes a shared angular frame — no
+  extrinsic calibration, no world-coordinate projection. The single-camera
+  cue/confirm path doesn't need this.
 - **NIR sensor fusion.** The `fuse_detections` code path exists, but no NIR
   detector is wired in, so the NIR candidate list is always empty and fusion has
   no real effect.
 - **Ground-station threat scoring.** `dronebig.py` emits a neutral placeholder
   (`0.0` / `UNKNOWN`); only the edge node computes a real threat estimate.
-- **Not benchmarked on a Raspberry Pi 5.** Developed and tested on a PC;
-  on-device latency/throughput are unverified.
+- **Not benchmarked on Pi 5 or Jetson Orin NX.** Developed/tested on a PC;
+  on-device latency/throughput are unverified, and the Jetson needs its own
+  CUDA-enabled PyTorch build (PyPI `torch` won't give it GPU). Running the heavy
+  model on a CPU is very slow — the design assumes the Orin's GPU.
 
 ---
 
@@ -548,6 +703,14 @@ This is a WIP portfolio project. What's real vs. not:
   Greedily union the closest cross-sender pairs within a few degrees, never
   unioning two tracks from the same sensor, then keep stable global IDs across
   frames with a short time-to-live.
+- **Cue / confirm (two-tier inference).** A cheap, high-recall detector on the
+  edge decides *what's worth a closer look* and ships only small crops; a heavy,
+  high-precision model on the GPU box is the *judge* that confirms or rejects.
+  This spends bandwidth and heavy compute only when something is flagged, instead
+  of streaming full video and running the big model on every frame.
+- **Pixel-IoU association.** Because the crop and the heavy model's result live in
+  the *same* frame, matching is plain intersection-over-union in pixels — precise,
+  and far simpler than the angular gate the multi-camera merge needs.
 
 ---
 
@@ -556,8 +719,14 @@ This is a WIP portfolio project. What's real vs. not:
 - **One shared contract (`schemas.py`).** Producers and consumer validate the
   same Pydantic models, so the format can't silently drift, and out-of-range
   junk (`threat_score=50`) is rejected at ingest instead of corrupting the UI.
-- **One shared telemetry client (`telemetry.py`).** Killed a near-identical
-  copy-pasted client on each node. One place to fix bugs, one behaviour.
+- **One shared POST worker (`telemetry.py`).** Killed a near-identical
+  copy-pasted client on each node, then split out `AsyncPoster` so the telemetry
+  client, the candidate sender, and the confirm-service forwarder all reuse the
+  same non-blocking, drop-oldest behaviour.
+- **Cue/confirm over crops, not video.** The edge filters first and sends only
+  small crops; the heavy GPU model runs only on those. It keeps the tether light
+  and the big model idle until there's something to judge — the right division of
+  labour for a Pi-on-a-drone + Orin-on-the-ground deployment.
 - **Non-blocking, drop-oldest telemetry.** Detection latency is sacred; the
   network is not allowed to slow the frame loop, so a full queue drops the oldest
   frame rather than blocking.
@@ -578,8 +747,13 @@ This is a WIP portfolio project. What's real vs. not:
 - **Counter-UAS / C-UAS** — counter unmanned-aerial-system; detecting/tracking
   drones.
 - **Edge node** — the lightweight field detector (`drone_detector.py`).
-- **Ground station** — the PC side: the server plus the heavy tracker.
-- **Sender** — anything that POSTs telemetry (both detectors are senders).
+- **Ground station** — the GPU side: the broker plus the heavy confirm service.
+- **Cue / confirm** — the two-tier pattern: cheap edge detector *cues* candidates,
+  heavy ground model *confirms* them.
+- **Candidate** — a drone-like region the edge flagged and cropped, sent for
+  confirmation (`CandidateCrop`).
+- **Confirmation** — the heavy model's verdict on a candidate (`Confirmation`).
+- **Sender** — anything that POSTs to the broker (the edge, and `dronebig.py`).
 - **Track** — one target being followed over time, with a stable ID.
 - **az / el** — azimuth (left-right) and elevation (up-down) angle off the
   camera's centerline, in degrees.
