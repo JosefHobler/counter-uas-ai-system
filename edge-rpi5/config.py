@@ -95,3 +95,12 @@ MAX_ROIS_PER_FRAME = 3
 GROUND_STATION_URL = "http://localhost:8000/api/telemetry"
 NODE_ID = "edge-rpi5-alpha"
 
+# ============================================================
+# Cue / confirm pipeline
+# ============================================================
+# When --confirm-url is set, the edge ships candidate crops to the ground
+# confirm service for heavy verification. These tune how often and how much.
+CONFIRM_SERVICE_URL = "http://localhost:8001/api/candidate"
+CANDIDATE_EVERY_N_FRAMES = 15   # throttle: send each track's crop at most this often
+CANDIDATE_MARGIN = 0.4          # context padding around the box, as a fraction of its longer side
+

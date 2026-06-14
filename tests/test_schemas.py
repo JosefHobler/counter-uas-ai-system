@@ -7,7 +7,14 @@ used to flow straight to the dashboard must now be rejected at validation time.
 import pytest
 from pydantic import ValidationError
 
-from common.schemas import TelemetryPayload, ThreatState, Track
+from common.schemas import (
+    BBox,
+    CandidateCrop,
+    Confirmation,
+    TelemetryPayload,
+    ThreatState,
+    Track,
+)
 
 
 def _valid_track_kwargs(**overrides):
@@ -67,3 +74,81 @@ def test_payload_roundtrip_dumps_plain_json():
     assert dumped["sender_id"] == "edge-rpi5-alpha"
     # Enum coerced to its string value, ready to broadcast as JSON.
     assert dumped["tracks"][0]["threat_state"] == "APPROACHING"
+
+
+# -- cue/confirm contract ----------------------------------------------------
+
+
+def _valid_candidate_kwargs(**overrides):
+    base = dict(
+        sender_id="edge-rpi5-alpha",
+        candidate_id=1,
+        frame_id=10,
+        bbox=BBox(x=5.0, y=5.0, w=20.0, h=20.0),
+        crop_x=0.0,
+        crop_y=0.0,
+        crop_width=40,
+        crop_height=40,
+        confidence=0.7,
+        image_jpeg_b64="Zm9v",  # non-empty
+    )
+    base.update(overrides)
+    return base
+
+
+def test_candidate_minimal_is_valid():
+    c = CandidateCrop(**_valid_candidate_kwargs())
+    assert c.track_id is None
+    assert c.candidate_id == 1
+
+
+def test_candidate_rejects_bad_confidence():
+    with pytest.raises(ValidationError):
+        CandidateCrop(**_valid_candidate_kwargs(confidence=1.5))
+
+
+def test_candidate_rejects_zero_crop_size():
+    with pytest.raises(ValidationError):
+        CandidateCrop(**_valid_candidate_kwargs(crop_width=0))
+
+
+def test_candidate_rejects_empty_image():
+    with pytest.raises(ValidationError):
+        CandidateCrop(**_valid_candidate_kwargs(image_jpeg_b64=""))
+
+
+def test_candidate_forbids_unknown_keys():
+    with pytest.raises(ValidationError):
+        CandidateCrop(**_valid_candidate_kwargs(frmae_id=10))
+
+
+def test_bbox_rejects_negative_dims():
+    with pytest.raises(ValidationError):
+        BBox(x=0.0, y=0.0, w=-1.0, h=10.0)
+
+
+def test_confirmation_drone_with_box():
+    conf = Confirmation(
+        sender_id="ground",
+        candidate_id=1,
+        frame_id=10,
+        track_id=7,
+        is_drone=True,
+        label="drone",
+        confidence=0.92,
+        bbox=BBox(x=10.0, y=12.0, w=18.0, h=16.0),
+    )
+    assert conf.is_drone is True
+    assert conf.bbox is not None
+
+
+def test_confirmation_negative_has_no_box():
+    conf = Confirmation(
+        sender_id="ground",
+        candidate_id=2,
+        frame_id=11,
+        is_drone=False,
+        confidence=0.0,
+    )
+    assert conf.is_drone is False
+    assert conf.bbox is None

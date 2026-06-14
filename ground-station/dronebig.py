@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 import supervision as sv
 from sahi import AutoDetectionModel
-from sahi.predict import get_sliced_prediction
+from sahi.predict import get_prediction, get_sliced_prediction
 import torch
 
 # Make the repo-root `common` package importable when run from ground-station/.
@@ -59,6 +59,61 @@ def parse_args():
     return parser.parse_args()
 
 
+def load_detection_model(model_path="best.pt", confidence=0.5, device=None):
+    """Load the heavy SAHI/YOLO model once.
+
+    Shared by the standalone tracker (``main``) and the confirm service so there
+    is a single place that knows how to construct the model.
+    """
+    if device is None:
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    return AutoDetectionModel.from_pretrained(
+        model_type="yolov8",
+        model_path=model_path,
+        confidence_threshold=confidence,
+        device=device,
+    )
+
+
+def detect_on_image(detection_model, image_rgb, slice_size=640, overlap_ratio=0.2, sliced=True):
+    """Run inference on one RGB image.
+
+    Returns a list of detections, each
+    ``{"xyxy": (x1, y1, x2, y2), "confidence": float, "class_id": int, "label": str}``.
+
+    ``sliced=True`` (SAHI tiling) is for full frames where targets are tiny — used
+    per-frame by the standalone tracker. ``sliced=False`` runs a single plain
+    inference and is used per-crop by the confirm service: a crop is already
+    small/zoomed, so slicing it is wasted work.
+    """
+    if sliced:
+        result = get_sliced_prediction(
+            image_rgb,
+            detection_model,
+            slice_height=slice_size,
+            slice_width=slice_size,
+            overlap_height_ratio=overlap_ratio,
+            overlap_width_ratio=overlap_ratio,
+            verbose=0,
+        )
+    else:
+        result = get_prediction(image_rgb, detection_model)
+    dets = []
+    for obj in result.object_prediction_list:
+        category = getattr(obj, "category", None)
+        category_id = getattr(category, "id", 0) or 0
+        category_name = getattr(category, "name", None) or "drone"
+        dets.append(
+            {
+                "xyxy": (obj.bbox.minx, obj.bbox.miny, obj.bbox.maxx, obj.bbox.maxy),
+                "confidence": float(obj.score.value),
+                "class_id": int(category_id),
+                "label": category_name,
+            }
+        )
+    return dets
+
+
 def main():
     args = parse_args()
 
@@ -70,12 +125,7 @@ def main():
 
     # Load model
     print("Loading AI model...")
-    detection_model = AutoDetectionModel.from_pretrained(
-        model_type='yolov8',
-        model_path=args.model,
-        confidence_threshold=args.confidence,
-        device="cuda:0" if torch.cuda.is_available() else "cpu"
-    )
+    detection_model = load_detection_model(args.model, args.confidence)
 
     # Initialize supervision tracker and annotators
     tracker = sv.ByteTrack(
@@ -114,35 +164,16 @@ def main():
             break
         frame_count += 1
 
-        # --- STEP A: SAHI DETECTION ---
-        # Convert from BGR (OpenCV) to RGB (SAHI)
+        # --- STEP A: SAHI DETECTION (shared with the confirm service) ---
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        result = get_sliced_prediction(
-            rgb_frame,
-            detection_model,
-            slice_height=640,
-            slice_width=640,
-            overlap_height_ratio=0.2,
-            overlap_width_ratio=0.2,
-            verbose=0
-        )
+        dets = detect_on_image(detection_model, rgb_frame)
 
         # --- STEP B: CONVERT TO SUPERVISION FORMAT ---
-        xyxy = []
-        confidences = []
-        class_ids = []
-
-        for obj in result.object_prediction_list:
-            xyxy.append([obj.bbox.minx, obj.bbox.miny, obj.bbox.maxx, obj.bbox.maxy])
-            confidences.append(obj.score.value)
-            class_ids.append(0)  # Drone is class 0
-
-        if len(xyxy) > 0:
+        if dets:
             detections = sv.Detections(
-                xyxy=np.array(xyxy),
-                confidence=np.array(confidences),
-                class_id=np.array(class_ids)
+                xyxy=np.array([d["xyxy"] for d in dets], dtype=float),
+                confidence=np.array([d["confidence"] for d in dets], dtype=float),
+                class_id=np.array([d["class_id"] for d in dets], dtype=int),
             )
         else:
             detections = sv.Detections.empty()

@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Make the repo-root `common` package importable when run as `python server.py`.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common.schemas import TelemetryPayload  # noqa: E402
+from common.schemas import TelemetryPayload, Confirmation  # noqa: E402
 from common.merge import TrackMerger  # noqa: E402
 
 app = FastAPI(title="Anti-Drone Ground Station API")
@@ -57,6 +57,9 @@ merger = TrackMerger()
 # Most recent merged global-track list, served to dashboards on connect.
 latest_unified: List[dict] = []
 
+# Cue/confirm: latest heavy-model verdict per candidate, keyed "sender_id:candidate_id".
+latest_confirmations: Dict[str, dict] = {}
+
 @app.post("/api/telemetry")
 async def receive_telemetry(payload: TelemetryPayload):
     """
@@ -97,6 +100,31 @@ async def receive_telemetry(payload: TelemetryPayload):
 
     return {"status": "ok", "tracks_received": len(payload.tracks), "unified_tracks": len(latest_unified)}
 
+@app.post("/api/confirmation")
+async def receive_confirmation(confirmation: Confirmation):
+    """
+    The ground confirm service POSTs heavy-model verdicts on candidate crops here.
+    """
+    record = confirmation.model_dump()
+    key = f"{confirmation.sender_id}:{confirmation.candidate_id}"
+    latest_confirmations[key] = record
+
+    broadcast_msg = json.dumps({
+        "type": "confirmation",
+        "confirmation": record,
+    })
+    asyncio.create_task(manager.broadcast(broadcast_msg))
+
+    return {"status": "ok", "is_drone": confirmation.is_drone}
+
+
+@app.get("/api/confirmations")
+async def get_confirmations():
+    """Latest heavy-model verdict per candidate (cue/confirm pipeline)."""
+    return {"confirmations": list(latest_confirmations.values()),
+            "count": len(latest_confirmations)}
+
+
 @app.get("/api/state")
 async def get_current_state():
     """
@@ -123,7 +151,8 @@ async def websocket_radar(websocket: WebSocket):
         await websocket.send_text(json.dumps({
             "type": "full_state",
             "data": latest_telemetry,
-            "unified": latest_unified
+            "unified": latest_unified,
+            "confirmations": list(latest_confirmations.values())
         }))
         
         while True:

@@ -22,6 +22,8 @@ from tracker import CentroidTracker
 # Make the repo-root `common` package importable when run from edge-rpi5/.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common.telemetry import TelemetryClient
+from common.candidates import CandidateSender
+from common.geometry import bbox_iou
 
 _yolo_model = None
 
@@ -337,32 +339,6 @@ def is_same_target(det_a, det_b, max_distance):
     ax, ay = det_a["centroid"]
     bx, by = det_b["centroid"]
     return math.hypot(ax - bx, ay - by) <= max_distance
-
-
-def bbox_iou(box_a, box_b):
-    ax, ay, aw, ah = box_a
-    bx, by, bw, bh = box_b
-
-    ax2 = ax + aw
-    ay2 = ay + ah
-    bx2 = bx + bw
-    by2 = by + bh
-
-    inter_x1 = max(ax, bx)
-    inter_y1 = max(ay, by)
-    inter_x2 = min(ax2, bx2)
-    inter_y2 = min(ay2, by2)
-
-    inter_w = max(0, inter_x2 - inter_x1)
-    inter_h = max(0, inter_y2 - inter_y1)
-    inter_area = inter_w * inter_h
-    if inter_area <= 0:
-        return 0.0
-
-    area_a = max(1, aw * ah)
-    area_b = max(1, bw * bh)
-    union = area_a + area_b - inter_area
-    return inter_area / union if union > 0 else 0.0
 
 
 def detection_priority(det):
@@ -989,6 +965,13 @@ def main():
         default=None,
         help="Path to save the output video (e.g. output.mp4), forces offline mode",
     )
+    parser.add_argument(
+        "--confirm-url",
+        type=str,
+        default=None,
+        help="Ground confirm-service URL; enables cue/confirm crop streaming "
+        "(e.g. http://<ground>:8001/api/candidate)",
+    )
     args = parser.parse_args()
 
     if args.output is not None:
@@ -1056,7 +1039,17 @@ def main():
     
     # Initialize Telemetry Client
     telemetry = TelemetryClient(getattr(config, "GROUND_STATION_URL", "http://localhost:8000/api/telemetry"), getattr(config, "NODE_ID", "edge-rpi5-alpha"))
-    
+
+    # Cue/confirm: ship candidate crops to the ground confirm service when enabled.
+    candidate_sender = None
+    if args.confirm_url:
+        candidate_sender = CandidateSender(
+            args.confirm_url,
+            getattr(config, "NODE_ID", "edge-rpi5-alpha"),
+            margin=getattr(config, "CANDIDATE_MARGIN", 0.4),
+        )
+        print(f"[CUE] Candidate crops -> {args.confirm_url}")
+
     worker = None
     if not args.no_real_time:
         worker = DetectionWorker(model, use_nir)
@@ -1174,6 +1167,24 @@ def main():
             if out_tracks:
                 telemetry.send(out_tracks)
 
+        # Cue: ship candidate crops for the ground heavy model to confirm. Throttled
+        # per object, and cropped from the raw frame (no HUD) so the heavy model
+        # sees clean pixels. Only AI-confirmed tracks are worth a closer look.
+        if (
+            candidate_sender is not None
+            and frame_counter % config.CANDIDATE_EVERY_N_FRAMES == 0
+        ):
+            for obj in tracked_objects:
+                bx, by, bw, bh = obj.bbox
+                if bw > 0 and bh > 0 and getattr(obj, "confirmed_by_ai", False):
+                    candidate_sender.send_candidate(
+                        frame_orig,
+                        (bx, by, bw, bh),
+                        frame_id=frame_counter,
+                        track_id=getattr(obj, "id", None),
+                        confidence=float(getattr(obj, "confidence", 0.0)),
+                    )
+
         display_mode = "YOLO"
         if use_nir:
             display_mode += "+NIR"
@@ -1248,6 +1259,8 @@ def main():
 
     print("\n[STOP] Detection stopped.")
     telemetry.stop()
+    if candidate_sender is not None:
+        candidate_sender.stop()
     if worker is not None:
         worker.stop()
     if writer is not None:
