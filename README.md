@@ -1,11 +1,14 @@
 # Counter-UAS AI System
 
-A distributed drone detection and tracking pipeline. A lightweight edge node designed for a Raspberry Pi 5 handles low-latency field inference, while a heavier ground station PC performs thorough analysis in parallel. Both nodes stream their tracks to a central telemetry server, which broadcasts a unified real-time feed to any connected dashboard.
+A distributed drone detection and tracking pipeline. A lightweight edge node — sized to target a Raspberry Pi 5 — handles low-latency field inference, while a heavier ground station PC performs thorough analysis in parallel. Both nodes stream their tracks to a central telemetry server, which broadcasts a unified real-time feed to any connected dashboard.
 
-## Demonstration on publicly accesible drone videos (Edge model deployable on Raspberry Pi 5): 
+## Demonstration on publicly accesible drone videos (Edge model designed to target Raspberry Pi 5): 
 https://github.com/user-attachments/assets/e6949b60-a529-4d16-bb8c-a7056a93df6b
 
 <img width="1280" height="720" alt="thumbnail_1_0 0s (1)" src="https://github.com/user-attachments/assets/5c2f93f9-73d7-47d0-b696-a6601aa10b6c" />
+
+> [!NOTE]
+> The edge node was developed and tested on a PC, and is **designed to target** a Raspberry Pi 5 (compact ONNX model, frame-skipping, motion-guided cropping). It has **not yet been benchmarked on Pi 5 hardware** — the demonstration above was recorded on a PC, and on-device latency/throughput are not claimed.
 
 ---
 
@@ -32,7 +35,7 @@ https://github.com/user-attachments/assets/e6949b60-a529-4d16-bb8c-a7056a93df6b
 
 **How it works:**
 
-1. **Edge node** — the Pi 5 runs a compact ONNX model with frame-skipping and motion-guided SAHI cropping to stay fast without a GPU. Detected tracks are POSTed to the ground station server over the local network.
+1. **Edge node** — runs a compact ONNX model with frame-skipping and motion-guided SAHI cropping to stay fast without a GPU, sized to target a Raspberry Pi 5 (tested on PC). Detected tracks are POSTed to the ground station server over the local network.
 2. **Ground station AI** (`dronebig.py`) — a heavier PyTorch model with full SAHI grid scans runs on a PC for maximum detection sensitivity. It also POSTs its tracks to the same server.
 3. **Telemetry server** (`server.py`) — a FastAPI broker that merges tracks from every sender into a single global state and broadcasts live updates to the dashboard over WebSocket. The server doesn't care whether a track came from the Pi or the PC.
 4. **Dashboard** — any WebSocket-capable client connects to `/ws/radar` and receives a unified, real-time radar feed.
@@ -74,7 +77,7 @@ pip install -r requirements.txt
 
 ## 🛰️ Edge Node
 
-The edge node runs on a Raspberry Pi 5 (or any machine). It performs continuous detection and streams track data to the ground station server.
+The edge node is designed to target a Raspberry Pi 5 but runs on any machine; it was developed and tested on a PC and has not been benchmarked on Pi hardware. It performs continuous detection and streams track data to the ground station server.
 
 ```bash
 cd edge-rpi5
